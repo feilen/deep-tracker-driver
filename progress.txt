@@ -1,0 +1,10 @@
+[x] Get an example DCGAN working
+[ ] Customize example for mocap use
+  - Should use the 'less into more' stacking like the example, but
+  - should stack e.g. XinXout, XinYout, XinZout etc as the part that expands
+  - so the skeletal tracking info is based on more and more specific locations
+
+  - probably just use LSTM layers - no conv2dlayers required
+[ ] Make BVH import/export workable
+[ ] Load module into frugallydeep
+[ ] Use frugallydeep to integrate into steamvr driver
