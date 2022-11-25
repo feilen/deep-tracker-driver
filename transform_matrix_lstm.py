@@ -4,26 +4,142 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
+from pathlib import Path
 
+from pymo.parsers import BVHParser
 import io
+from pymo.viz_tools import draw_stickfigure, print_skel
+from pymo.preprocessing import MocapParameterizer, RootCentricPositionNormalizer, JointSelector, Numpyfier
+from scipy.spatial.transform import Rotation as R
+from sklearn.pipeline import Pipeline
+
+# adjust print options
+np.set_printoptions(suppress = True, precision=3, linewidth=100, edgeitems=12)
 
 # VR specific defines
 input_vr_devices = 3
 input_vr_frames = 3
 output_vr_devices = 7
-TMP_RAND_COUNT = 1000
+pretrained = False
+preloaded = False
 
-def augment_with_prior_frames(data_in):
+# Production, or quick iteration?
+test_training = True
+
+# TODO: make this framerate OR framenum based, allow arbitrary frame shapes,
+# e.g. [-1., -1, 0] for 'one second ago, one frame ago, current frame'
+def augment_with_prior_frames(data_in, frame_shape=None, framerate=None):
+    # TODO: use mocap.frame_time
     back_1_s = data_in[0 : data_in.shape[0] - 60, :, :]
     back_1_frame = data_in[1 : data_in.shape[0] - 59, :, :]
     cur_frame = data_in[60 : data_in.shape[0],:, : ]
-    print(str(cur_frame.shape))
     return np.concatenate((back_1_s, back_1_frame, cur_frame), axis=2)
 
-# Our input set should be converted to shape (12, input_vr_devices) and the
+def load_frames_from_bvh(bvh_file):
+    # load file
+    parser = BVHParser()
+    parsed_data = parser.parse(bvh_file)
+    # get frames into matrix
+    mp = MocapParameterizer('euler')
+    # rotations now contains x,y,z + xrot,yrot,zrot for all channels
+    rotations = mp.fit_transform([parsed_data])[0]
+    # TODO: ALL data transforms (converting to t_m's, loading from bvh,
+    # augmenting with prior frames) should be done as data pipe operations
+    # for clarity
+    data_pipe = Pipeline([
+            ('param', MocapParameterizer('position')),
+            #('rcpn', RootCentricPositionNormalizer()),
+    ])
+
+    positions = data_pipe.fit_transform([parsed_data])[0]
+
+    dataset = np.zeros((len(rotations.values['Head_Xrotation']), 12, 0))
+    head_starting_positions = None
+    for joint_name in ['Head', 'LeftWrist', 'RightWrist',
+                       'Hips',
+                       'LeftAnkle', 'RightAnkle',
+                       'LeftElbow', 'RightElbow',
+                       'LeftKnee', 'RightKnee']:
+        rot_frames = np.vstack(
+            (rotations.values[joint_name + '_Xrotation'],
+             rotations.values[joint_name + '_Yrotation'],
+             rotations.values[joint_name + '_Zrotation'])).transpose()
+        r = R.from_euler('xyz', rot_frames, degrees=True)
+        pos_frames = np.vstack(
+            (positions.values[joint_name + '_Xposition'],
+             positions.values[joint_name + '_Yposition'],
+             positions.values[joint_name + '_Zposition'])).transpose()[:,None]
+
+        # Note, in 3ds Max convention, Z should be up - but it's not clear yet
+        # what convention this data uses.
+        # TODO: Normalize positions relative to head
+        #if joint_name == "Head":
+            #head_starting_positions = pos_frames
+        #pos_frames -= head_starting_positions
+
+        print(r.as_matrix().shape)
+        print(pos_frames.shape)
+        t_matrices = np.concatenate(
+            (r.as_matrix(),
+             np.swapaxes(pos_frames, 1, 2)),
+            axis=2
+        )
+        # print(t_matrices)
+        # t_matrices now container an array of transform matrices, one for every
+        dataset = np.dstack((dataset,t_matrices.reshape(-1,12)))
+
+    # TODO: normalize position to where all non-head transforms are
+    # relative to the head transform
+
+    # Normalize position scale [-1,1]
+    pos_scale = np.max([np.max(comp) - np.min(comp)
+                        for comp in dataset.transpose()])
+    print(pos_scale)
+    dataset *= np.array([[1,1,1,1./pos_scale,
+                         1,1,1,1./pos_scale,
+                         1,1,1,1./pos_scale]]*10).transpose()
+    print(dataset.shape)
+    print(dataset)
+    #print_skel(parsed_data)
+    #draw_stickfigure(positions[0], frame=0)
+    return dataset
+
+
+def load_all_bvh():
+    if preloaded:
+        with np.load('train_data_x.npz') as fi:
+            x = fi[fi.files[0]]
+        with np.load('train_data_y.npz') as fi:
+            y = fi[fi.files[0]]
+        return x, y
+
+    accum_x = np.zeros((0, 12, 9))
+    accum_y = np.zeros((0, 12, 7))
+    for path in Path('input_bvh').rglob("*.bvh"):
+        arr = load_frames_from_bvh(path.absolute())
+        if arr.shape[0] < 60:
+            continue
+        portion_x = augment_with_prior_frames(arr[:,:,:3])
+        portion_y = arr[:,:,3:][60:]
+
+        print(portion_x.shape)
+        print(portion_y.shape)
+        accum_x = np.append(accum_x, portion_x, axis=0)
+        accum_y = np.append(accum_y, portion_y, axis=0)
+
+    # TODO: normalize over-time head transform where head(t=0) = 0,0,z,
+    # head(t=-1) = -dx_t, -dy_t, z
+    print(accum_x.shape)
+    print(accum_y.shape)
+    np.savez('train_data_x.npz', accum_x)
+    np.savez('train_data_y.npz', accum_y)
+
+    return accum_x, accum_y
+
+
+# Our input set should be converted to shape (12, input_vr_devices*frames) and the
 # output (12, output_vr_devices)
-dataset_x = augment_with_prior_frames(np.random.rand(TMP_RAND_COUNT,12,input_vr_devices))
-dataset_y = np.random.rand(TMP_RAND_COUNT,12,output_vr_devices)[60:]
+dataset_x, dataset_y = load_all_bvh()
 
 # TODO: translation of non-head transforms should be normalized relative to
 # the head transform - need a way to avoid the X and Y of the head from changing
@@ -34,13 +150,6 @@ indices = np.arange(dataset_x.shape[0])
 np.random.shuffle(indices)
 train_indices = indices[: int(0.9 * dataset_x.shape[0])]
 val_indices = indices[int(0.9 * dataset_x.shape[0]) :]
-
-# We'll define a helper function to shift the frames, where
-# `x` is frames 0 to n - 1, and `y` is frames 1 to n.
-#def create_shifted_frames(data):
-#    x = data[:, 0 : data.shape[1] - 1, :, :]
-#    y = data[:, 1 : data.shape[1], :, :]
-#    return x, y
 
 # TODO In practice, we're actually going to want the most recent two frames,
 # and a frame 1s ago - let's sample that by going 60 frames back
@@ -56,151 +165,62 @@ print("Validation Dataset Shapes: " + str(x_val.shape) + ", " + str(y_val.shape)
 
 # TODO: Some way to visualize some example data here
 
-# Construct the input layer with no definite frame size.
-inp = layers.Input(shape=(12,input_vr_devices * input_vr_frames)) #shape=(None, *x_train.shape[2:]))
+if pretrained:
+    model = tf.keras.models.load_model('keras_model.h5')
+else:
+    # Construct the input layer with no definite frame size.
+    inp = layers.Input(shape=(12,input_vr_devices * input_vr_frames)) #shape=(None, *x_train.shape[2:]))
 
-# We will construct 3 `ConvLSTM2D` layers with batch normalization,
-# followed by a `Conv3D` layer for the spatiotemporal outputs.
-x = layers.LSTM(units=4, return_sequences=True, activation="relu",)(inp)
-x = layers.LSTM(units=8, return_sequences=True, activation="relu",)(x)
-x = layers.LSTM(units=12, return_sequences=True, activation="relu",)(x)
-x = layers.Dropout(0.2)(x)
-x = layers.Dense(output_vr_devices, activation="sigmoid")(x)
+    # followed by a `Conv3D` layer for the spatiotemporal outputs.
+    #x = layers.LSTM(units=4, return_sequences=True, activation="relu",)(inp)
+    #x = layers.LSTM(units=8, return_sequences=True, activation="relu",)(x)
+    #x = layers.LSTM(units=12, return_sequences=True, activation="relu",)(x)
+    #x = layers.Dropout(0.2)(x)
+    #x = layers.Dense(output_vr_devices, activation="sigmoid")(x)
+    x = layers.Dropout(0.4)(inp)
+    x = layers.LSTM(units=9, return_sequences=True, activation="tanh",)(x)
+    x = layers.LSTM(units=9, return_sequences=True, activation="tanh",)(x)
+    x = layers.LSTM(units=9, return_sequences=True, activation="tanh",)(x)
+    x = layers.Dense(output_vr_devices, activation="tanh")(x)
 
-# Next, we will build the complete model and compile it.
-model = keras.models.Model(inp, x)
-model.compile(
-    loss=keras.losses.binary_crossentropy,
-    optimizer=keras.optimizers.Adam(),
-)
-model.summary()
+    # Next, we will build the complete model and compile it.
+    model = keras.models.Model(inp, x)
+    model.compile(
+        #loss=keras.losses.binary_crossentropy,
+        loss=keras.losses.mse,
+        optimizer=keras.optimizers.Adam(),
+    )
+    model.summary()
 
-"""
-## Model Training
+    """
+    ## Model Training
 
-With our model and data constructed, we can now train the model.
-"""
+    With our model and data constructed, we can now train the model.
+    """
 
-# Define some callbacks to improve training.
-early_stopping = keras.callbacks.EarlyStopping(monitor="val_loss", patience=10)
-reduce_lr = keras.callbacks.ReduceLROnPlateau(monitor="val_loss", patience=5)
+    # Define some callbacks to improve training.
+    early_stopping = keras.callbacks.EarlyStopping(monitor="val_loss", patience=10)
+    reduce_lr = keras.callbacks.ReduceLROnPlateau(monitor="val_loss", patience=5)
 
-# Define modifiable training hyperparameters.
-epochs = 20
-batch_size = 5
+    # Define modifiable training hyperparameters.
+    epochs = 10 if test_training else 100
+    batch_size = 5
 
-# Fit the model to the training data.
-model.fit(
-    x_train,
-    y_train,
-    batch_size=batch_size,
-    epochs=epochs,
-    validation_data=(x_val, y_val),
-    callbacks=[early_stopping, reduce_lr],
-)
-assert(False)
-"""
-## Frame Prediction Visualizations
-
-With our model now constructed and trained, we can generate
-some example frame predictions based on a new video.
-
-We'll pick a random example from the validation set and
-then choose the first ten frames from them. From there, we can
-allow the model to predict 10 new frames, which we can compare
-to the ground truth frame predictions.
-"""
+    # Fit the model to the training data.
+    model.fit(
+        x_train,
+        y_train,
+        batch_size=batch_size,
+        epochs=epochs,
+        validation_data=(x_val, y_val),
+        callbacks=[early_stopping, reduce_lr],
+    )
+    model.save('keras_model.h5', include_optimizer=False)
 
 # Select a random example from the validation dataset.
-example = val_dataset[np.random.choice(range(len(val_dataset)), size=1)[0]]
+example = x_val[np.random.choice(range(len(x_val)), size=1)[0]][:, :]
 
-# Pick the first/last ten frames from the example.
-frames = example[:10, ...]
-original_frames = example[10:, ...]
-
-# Predict a new set of 10 frames.
-for _ in range(10):
-    # Extract the model's prediction and post-process it.
-    new_prediction = model.predict(np.expand_dims(frames, axis=0))
-    new_prediction = np.squeeze(new_prediction, axis=0)
-    predicted_frame = np.expand_dims(new_prediction[-1, ...], axis=0)
-
-    # Extend the set of prediction frames.
-    frames = np.concatenate((frames, predicted_frame), axis=0)
-
-# Construct a figure for the original and new frames.
-fig, axes = plt.subplots(2, 10, figsize=(20, 4))
-
-# Plot the original frames.
-for idx, ax in enumerate(axes[0]):
-    ax.imshow(np.squeeze(original_frames[idx]), cmap="gray")
-    ax.set_title(f"Frame {idx + 11}")
-    ax.axis("off")
-
-# Plot the new frames.
-new_frames = frames[10:, ...]
-for idx, ax in enumerate(axes[1]):
-    ax.imshow(np.squeeze(new_frames[idx]), cmap="gray")
-    ax.set_title(f"Frame {idx + 11}")
-    ax.axis("off")
-
-# Display the figure.
-plt.show()
-
-"""
-## Predicted Videos
-
-Finally, we'll pick a few examples from the validation set
-and construct some GIFs with them to see the model's
-predicted videos.
-
-You can use the trained model hosted on [Hugging Face Hub](https://huggingface.co/keras-io/conv-lstm)
-and try the demo on [Hugging Face Spaces](https://huggingface.co/spaces/keras-io/conv-lstm).
-"""
-
-# Select a few random examples from the dataset.
-examples = val_dataset[np.random.choice(range(len(val_dataset)), size=5)]
-
-# Iterate over the examples and predict the frames.
-predicted_videos = []
-for example in examples:
-    # Pick the first/last ten frames from the example.
-    frames = example[:10, ...]
-    original_frames = example[10:, ...]
-    new_predictions = np.zeros(shape=(10, *frames[0].shape))
-
-    # Predict a new set of 10 frames.
-    for i in range(10):
-        # Extract the model's prediction and post-process it.
-        frames = example[: 10 + i + 1, ...]
-        new_prediction = model.predict(np.expand_dims(frames, axis=0))
-        new_prediction = np.squeeze(new_prediction, axis=0)
-        predicted_frame = np.expand_dims(new_prediction[-1, ...], axis=0)
-
-        # Extend the set of prediction frames.
-        new_predictions[i] = predicted_frame
-
-    # Create and save GIFs for each of the ground truth/prediction images.
-    for frame_set in [original_frames, new_predictions]:
-        # Construct a GIF from the selected video frames.
-        current_frames = np.squeeze(frame_set)
-        current_frames = current_frames[..., np.newaxis] * np.ones(3)
-        current_frames = (current_frames * 255).astype(np.uint8)
-        current_frames = list(current_frames)
-
-        # Construct a GIF from the frames.
-        with io.BytesIO() as gif:
-            #imageio.mimsave(gif, current_frames, "GIF", fps=5)
-            predicted_videos.append(gif.getvalue())
-
-## Display the videos.
-#print(" Truth\tPrediction")
-#for i in range(0, len(predicted_videos), 2):
-#    # Construct and display an `HBox` with the ground truth and prediction.
-#    box = HBox(
-#        [
-#            widgets.Image(value=predicted_videos[i]),
-#            widgets.Image(value=predicted_videos[i + 1]),
-#        ]
-#    )
-#    display(box)
+# Predict a new set of 10.
+new_prediction = model.predict(np.expand_dims(example, axis=0))
+print(repr(example[:,6:]))
+print(repr(new_prediction))

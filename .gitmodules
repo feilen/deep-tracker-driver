@@ -1,0 +1,9 @@
+[submodule "frugally-deep"]
+	path = frugally-deep
+	url = https://github.com/Dobiasd/frugally-deep.git
+[submodule "FunctionalPlus"]
+	path = FunctionalPlus
+	url = https://github.com/Dobiasd/FunctionalPlus.git
+[submodule "json"]
+	path = json
+	url = https://github.com/nlohmann/json.git
