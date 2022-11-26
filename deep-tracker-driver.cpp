@@ -25,33 +25,11 @@ void DeepTrackerDriver::TrackerDevice::Update()
     if (this->device_index_ == vr::k_unTrackedDeviceIndexInvalid)
         return;
 
-    // Check if this device was asked to be identified
-    auto events = GetDriver()->GetOpenVREvents();
-    for (auto event : events) {
-        // Note here, event.trackedDeviceIndex does not necissarily equal this->device_index_, not sure why, but the component handle will match so we can just use that instead
-        //if (event.trackedDeviceIndex == this->device_index_) {
-        if (event.eventType == vr::EVREventType::VREvent_Input_HapticVibration) {
-            if (event.data.hapticVibration.componentHandle == this->haptic_component_) {
-                this->did_vibrate_ = true;
-            }
-        }
-        //}
-    }
-
-    // Check if we need to keep vibrating
-    if (this->did_vibrate_) {
-        this->vibrate_anim_state_ += (GetDriver()->GetLastFrameTime().count()/1000.f);
-        if (this->vibrate_anim_state_ > 1.0f) {
-            this->did_vibrate_ = false;
-            this->vibrate_anim_state_ = 0.0f;
-        }
-    }
-
     // Setup pose for this frame
     auto pose = IVRDevice::MakeDefaultPose();
 
     std::vector<float> inputs;
-    for(int i = 0; i < 3; i++)
+    for(size_t i = 0; i < sizeof(trained_offsets); i++)
     {
         for(auto inputPath: input_device_paths)
         {

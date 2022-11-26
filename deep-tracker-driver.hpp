@@ -60,5 +60,23 @@ namespace DeepTrackerDriver {
             k_pchPathUserKneeLeft,
             k_pchPathUserKneeRight
         };
+
+        class offset_marker {
+            public:
+            const union union_type {
+                union_type(float t): time_offset(t) {};
+                union_type(int32_t f): frame_offset(f) {};
+                float time_offset;
+                int32_t frame_offset;
+            } offset;
+            const enum class offset_type {
+                TIME,
+                FRAME
+            } type;
+            offset_marker(float t): offset(t), type(offset_type::TIME) {};
+            offset_marker(int32_t f): offset(f), type(offset_type::FRAME) {};
+        };
+
+        const offset_marker trained_offsets[3] = {-60, -1, 0};
     };
 };
