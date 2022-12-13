@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <openvr_capi.h>
+#include <fdeep/fdeep.hpp>
 
 #include <DriverFactory.hpp>
 #include <DeviceType.hpp>
@@ -12,7 +13,7 @@ namespace DeepTrackerDriver {
     class TrackerDevice : public IVRDevice {
         public:
 
-            TrackerDevice(std::string serial);
+            TrackerDevice(std::string serial, int device_offset);
             ~TrackerDevice() = default;
 
             // Inherited via IVRDevice
@@ -37,10 +38,18 @@ namespace DeepTrackerDriver {
         bool did_vibrate_ = false;
         float vibrate_anim_state_ = 0.f;
 
+        fdeep::model prediction_model;
+        int device_offset;
+
         vr::VRInputComponentHandle_t haptic_component_ = 0;
 
         vr::VRInputComponentHandle_t system_click_component_ = 0;
         vr::VRInputComponentHandle_t system_touch_component_ = 0;
+
+        enum class input_convention {
+            XYZ,
+            XZY
+        } data_convention = input_convention::XYZ;
 
         // These two must match the neural network inputs
         // TODO: make this user UserHandPrimary, configurable?

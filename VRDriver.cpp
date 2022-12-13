@@ -10,8 +10,14 @@ vr::EVRInitError DeepTrackerDriver::VRDriver::Init(vr::IVRDriverContext* pDriver
 
     Log("Activating DeepTrackerDriver...");
 
-    // Add a tracker
-    this->AddDevice(std::make_shared<TrackerDevice>("Example_TrackerDevice"));
+    // Add a tracker - TODO determine from fdeep_model how many we need automatically
+    this->AddDevice(std::make_shared<TrackerDevice>("Deep_Tracker_0", 0));
+    this->AddDevice(std::make_shared<TrackerDevice>("Deep_Tracker_1", 1));
+    this->AddDevice(std::make_shared<TrackerDevice>("Deep_Tracker_2", 2));
+    this->AddDevice(std::make_shared<TrackerDevice>("Deep_Tracker_3", 3));
+    this->AddDevice(std::make_shared<TrackerDevice>("Deep_Tracker_4", 4));
+    this->AddDevice(std::make_shared<TrackerDevice>("Deep_Tracker_5", 5));
+    this->AddDevice(std::make_shared<TrackerDevice>("Deep_Tracker_6", 6));
 
     Log("DeepTrackerDriver Loaded Successfully");
 
@@ -92,8 +98,13 @@ bool DeepTrackerDriver::VRDriver::AddDevice(std::shared_ptr<IVRDevice> device)
             return false;
     }
     bool result = vr::VRServerDriverHost()->TrackedDeviceAdded(device->GetSerial().c_str(), openvr_device_class, device.get());
-    if(result)
+    if (result) {
         this->devices_.push_back(device);
+        Log("TrackedDeviceAdded");
+    }
+    else
+        Log("Failed to TrackedDeviceAdded");
+
     return result;
 }
 

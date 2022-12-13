@@ -7,7 +7,7 @@
 
 #include <IVRDriver.hpp>
 
-#ifdef WINDOWS
+#ifdef _WIN32
 extern "C" __declspec(dllexport) void* HmdDriverFactory(const char* interface_name, int* return_code);
 #endif
 

@@ -3,15 +3,16 @@
 // Update model with:
 // python3 frugally-deep/keras_export/convert_model.py keras_model.h5 fdeep_model.json
 
-#include <fdeep/fdeep.hpp>
 #include <Eigen/Geometry>
 #include <cmath>
 
 #include "deep-tracker-driver.hpp"
 #include "get-device-pose.hpp"
 
-DeepTrackerDriver::TrackerDevice::TrackerDevice(std::string serial):
-    serial_(serial)
+DeepTrackerDriver::TrackerDevice::TrackerDevice(std::string serial, int device_offset) :
+    serial_(serial),
+    prediction_model(fdeep::load_model("C:/fdeep_model.json")),
+    device_offset(device_offset)
 {
 }
 
@@ -29,47 +30,76 @@ void DeepTrackerDriver::TrackerDevice::Update()
     auto pose = IVRDevice::MakeDefaultPose();
 
     std::vector<float> inputs;
-    for(size_t i = 0; i < sizeof(trained_offsets); i++)
+    std::vector<float> head_pos;
+    for(size_t i = 0; i < sizeof(trained_offsets) / sizeof(trained_offsets[0]); i++)
     {
         for(auto inputPath: input_device_paths)
         {
             auto mat = getDevicePose(inputPath);
             std::vector<float> flatmat{
-                mat.m[0][0], mat.m[0][1], mat.m[0][2], mat.m[0][3],
-                mat.m[1][0], mat.m[1][1], mat.m[1][2], mat.m[1][3],
-                mat.m[2][0], mat.m[2][1], mat.m[2][2], mat.m[2][3]
+                mat.m[0][0], mat.m[0][1], mat.m[0][2], mat.m[0][3] / 1.879f,
+                mat.m[1][0], mat.m[1][1], mat.m[1][2], mat.m[1][3] / 1.879f,
+                mat.m[2][0], mat.m[2][1], mat.m[2][2], mat.m[2][3] / 1.879f
             };
+            // make input position head-relative
+            if (i == 0) {
+                head_pos = { flatmat[3], flatmat[7], flatmat[11] };
+            }
+            flatmat[3] -= head_pos[0];
+            flatmat[7] -= head_pos[1];
+            flatmat[11] -= head_pos[2];
             inputs.insert(inputs.end(), flatmat.begin(), flatmat.end());
+        }
+    }
+    std::vector<float> transposed_inputs;
+    // TODO: input data is transposed... should fix that at some point.
+    for (int i = 0; i < 12; i++) {
+        for (int j = 0; j < 9; j++) {
+            transposed_inputs.push_back(inputs[j * 12 + i]);
         }
     }
 
     // TODO: make one model.predict() update many trackers
-    const int device_offset = 0;
-
     // format and feed into model.predict()
-    const auto model = fdeep::load_model("fdeep_model.json");
-    const auto result = model.predict(
+    // TODO: fail gracefully if we don't find fdeep_model.json
+    // may actually be better to hardcode the JSON file into the driver
+    const auto result = prediction_model.predict(
         {fdeep::tensor(fdeep::tensor_shape(static_cast<std::size_t>(12),
                                            static_cast<std::size_t>(9)),
-        inputs)})[0];
+        transposed_inputs)})[0];
 
     std::cout << fdeep::show_tensor(result) << std::endl;
 
+    size_t y_out = (data_convention == input_convention::XYZ) ? 1 : 2;
+    size_t z_out = (data_convention == input_convention::XYZ) ? 2 : 1;
+
     // convert result into vecPosition and qRotation
-    pose.vecPosition[0] = result.get(fdeep::tensor_pos(device_offset, 3));
-    pose.vecPosition[1] = result.get(fdeep::tensor_pos(device_offset, 7));
-    pose.vecPosition[2] = result.get(fdeep::tensor_pos(device_offset, 11));
+    // In the original dataset, most data gets boxed into a value of +-28 units, 
+    // presumably inches? For now, hardcode the scale factor to my height (~6'2")
+    // Also add head (first thing queried) position
+    pose.vecPosition[0] = inputs[3] + result.get(fdeep::tensor_pos(device_offset, 3)) * 1.879;
+    pose.vecPosition[y_out] = inputs[7] + result.get(fdeep::tensor_pos(device_offset, 7)) * 1.879;
+    pose.vecPosition[z_out] = inputs[11] + result.get(fdeep::tensor_pos(device_offset, 11)) * 1.879;
+
+    pose.vecPosition[2] -= 2.;
+
+    GetDriver()->Log(std::to_string(pose.vecPosition[0]) + " " + std::to_string(pose.vecPosition[1]) + " " + std::to_string(pose.vecPosition[2]));
 
     Eigen::Matrix3f rotMatrix;
     rotMatrix(0,0) = result.get(fdeep::tensor_pos(device_offset, 0));
     rotMatrix(0,1) = result.get(fdeep::tensor_pos(device_offset, 1));
     rotMatrix(0,2) = result.get(fdeep::tensor_pos(device_offset, 2));
-    rotMatrix(1,0) = result.get(fdeep::tensor_pos(device_offset, 4));
-    rotMatrix(1,1) = result.get(fdeep::tensor_pos(device_offset, 5));
-    rotMatrix(1,2) = result.get(fdeep::tensor_pos(device_offset, 6));
-    rotMatrix(2,0) = result.get(fdeep::tensor_pos(device_offset, 8));
-    rotMatrix(2,1) = result.get(fdeep::tensor_pos(device_offset, 9));
-    rotMatrix(2,2) = result.get(fdeep::tensor_pos(device_offset, 10));
+
+    // TODO: debug messages that complain if the X/Y/Z magnitude aren't roughly 1.
+
+    // Swap Y and Z here
+    rotMatrix(y_out,0) = result.get(fdeep::tensor_pos(device_offset, 4));
+    rotMatrix(y_out,1) = result.get(fdeep::tensor_pos(device_offset, 5));
+    rotMatrix(y_out,2) = result.get(fdeep::tensor_pos(device_offset, 6));
+
+    rotMatrix(z_out,0) = result.get(fdeep::tensor_pos(device_offset, 8));
+    rotMatrix(z_out,1) = result.get(fdeep::tensor_pos(device_offset, 9));
+    rotMatrix(z_out,2) = result.get(fdeep::tensor_pos(device_offset, 10));
 
     Eigen::Quaternion<float> poseQuat(rotMatrix);
     pose.qRotation.x = poseQuat.x();
@@ -86,7 +116,7 @@ void DeepTrackerDriver::TrackerDevice::Update()
     //        vr::EVRSkeletalTrackingLevel::VRSkeletalTracking::Full, nullptr, 0,
     //        &skeletal_tracking_component);
     //vr::IVRDriverInput::UpdateSkeletonComponent(skeletal_tracking_component,
-
+    pose.deviceIsConnected = true;
     // Post pose
     GetDriver()->GetDriverHost()->TrackedDevicePoseUpdated(this->device_index_,
             pose, sizeof(vr::DriverPose_t));
@@ -128,8 +158,21 @@ vr::EVRInitError DeepTrackerDriver::TrackerDevice::Activate(uint32_t unObjectId)
     GetDriver()->GetProperties()->SetInt32Property(props, vr::Prop_ControllerRoleHint_Int32, vr::ETrackedControllerRole::TrackedControllerRole_OptOut);
 
     // Set up a render model path
-    GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_RenderModelName_String, "vr_controller_05_wireless_b");
-
+    if (device_offset == 0)
+    {
+        // waist
+        GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_RenderModelName_String, "locator");
+    }
+    else if (device_offset > 2)
+    {
+        // elbows and knees
+        GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_RenderModelName_String, "arrow");
+    }
+    else {
+        // feet
+        GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_RenderModelName_String, "vr_controller_05_wireless_b");
+    }
+    
     // Set controller profile
     GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_InputProfilePath_String, "{example}/input/example_tracker_bindings.json");
 
@@ -172,7 +215,7 @@ vr::DriverPose_t DeepTrackerDriver::TrackerDevice::GetPose()
     return last_pose_;
 }
 
-int main()
+/*int main()
 {
     const auto model = fdeep::load_model("fdeep_model.json");
     const auto result = model.predict(
@@ -191,4 +234,4 @@ int main()
                             0.,0.,0.,0.,0.,0.,0.,0.,0.,
                             })});
     std::cout << fdeep::show_tensors(result) << std::endl;
-}
+}*/
