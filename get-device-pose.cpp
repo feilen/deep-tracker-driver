@@ -68,10 +68,10 @@ vr::HmdMatrix34_t getDevicePose(const char* path)
         dev_index = vr::VRSystem()->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_LeftHand);
     }
     else if (path == "/user/hand/right") {
-        dev_index = vr::VRSystem()->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_LeftHand);
+        dev_index = vr::VRSystem()->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_RightHand);
     }
     else {
-        dev_index = 0;
+        dev_index = vr::k_unTrackedDeviceIndex_Hmd;
     }
     
     vr::TrackedDevicePose_t* movePose = devicePoses + dev_index;

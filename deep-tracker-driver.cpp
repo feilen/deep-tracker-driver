@@ -29,101 +29,109 @@ void DeepTrackerDriver::TrackerDevice::Update()
     // Setup pose for this frame
     auto pose = IVRDevice::MakeDefaultPose();
 
-    std::vector<float> inputs;
+    // input is:
+    // (devices * frames) devices of
+    // 3 rows of
+    // 4 columns
     std::vector<float> head_pos;
+    auto input_tensor = fdeep::tensor(fdeep::tensor_shape(
+        sizeof(input_device_paths) / sizeof(input_device_paths[0]) *
+        sizeof(trained_offsets) / sizeof(trained_offsets[0]),
+        static_cast<std::size_t>(3),
+        static_cast<std::size_t>(4)),
+        0.f);
     for(size_t i = 0; i < sizeof(trained_offsets) / sizeof(trained_offsets[0]); i++)
     {
-        for(auto inputPath: input_device_paths)
+        for(size_t j = 0; j < sizeof(input_device_paths) / sizeof(input_device_paths[0]); j++)
         {
-            auto mat = getDevicePose(inputPath);
-            std::vector<float> flatmat{
-                mat.m[0][0], mat.m[0][1], mat.m[0][2], mat.m[0][3] / 1.879f,
-                mat.m[1][0], mat.m[1][1], mat.m[1][2], mat.m[1][3] / 1.879f,
-                mat.m[2][0], mat.m[2][1], mat.m[2][2], mat.m[2][3] / 1.879f
-            };
-            // make input position head-relative
+            auto mat = getDevicePose(input_device_paths[j]);
             if (i == 0) {
-                head_pos = { flatmat[3], flatmat[7], flatmat[11] };
+                head_pos = {
+                    mat.m[0][3] / 1.879f,
+                    mat.m[1][3] / 1.879f,
+                    mat.m[2][3] / 1.879f
+                };
             }
-            flatmat[3] -= head_pos[0];
-            flatmat[7] -= head_pos[1];
-            flatmat[11] -= head_pos[2];
-            inputs.insert(inputs.end(), flatmat.begin(), flatmat.end());
-        }
-    }
-    std::vector<float> transposed_inputs;
-    // TODO: input data is transposed... should fix that at some point.
-    for (int i = 0; i < 12; i++) {
-        for (int j = 0; j < 9; j++) {
-            transposed_inputs.push_back(inputs[j * 12 + i]);
+            for (size_t k = 0; k < 3; k++)
+            {
+                for (size_t l = 0; l < 4; l++)
+                {
+                    input_tensor.set(fdeep::tensor_pos(i * 3 + j, k, l),
+                        (l == 3) ?
+                        (mat.m[k][l] / 1.879f) - head_pos[k] : // make input position head-relative
+                        mat.m[k][l]);
+                }
+            }
         }
     }
 
     // TODO: make one model.predict() update many trackers
     // format and feed into model.predict()
-    // TODO: fail gracefully if we don't find fdeep_model.json
-    // may actually be better to hardcode the JSON file into the driver
-    const auto result = prediction_model.predict(
-        {fdeep::tensor(fdeep::tensor_shape(static_cast<std::size_t>(12),
-                                           static_cast<std::size_t>(9)),
-        transposed_inputs)})[0];
+    // TODO: hardcode the JSON file into the driver
+    try {
+        const auto result = prediction_model.predict({input_tensor})[0];
 
-    std::cout << fdeep::show_tensor(result) << std::endl;
+        GetDriver()->Log(fdeep::show_tensor(result));
 
-    size_t y_out = (data_convention == input_convention::XYZ) ? 1 : 2;
-    size_t z_out = (data_convention == input_convention::XYZ) ? 2 : 1;
+        size_t y_out = (data_convention == input_convention::XYZ) ? 1 : 2;
+        size_t z_out = (data_convention == input_convention::XYZ) ? 2 : 1;
 
-    // convert result into vecPosition and qRotation
-    // In the original dataset, most data gets boxed into a value of +-28 units, 
-    // presumably inches? For now, hardcode the scale factor to my height (~6'2")
-    // Also add head (first thing queried) position
-    pose.vecPosition[0] = inputs[3] + result.get(fdeep::tensor_pos(device_offset, 3)) * 1.879;
-    pose.vecPosition[y_out] = inputs[7] + result.get(fdeep::tensor_pos(device_offset, 7)) * 1.879;
-    pose.vecPosition[z_out] = inputs[11] + result.get(fdeep::tensor_pos(device_offset, 11)) * 1.879;
+        // convert result into vecPosition and qRotation
+        // In the original dataset, most data gets boxed into a value of +-28 units, 
+        // presumably inches? For now, hardcode the scale factor to my height (~6'2")
+        // Also add head (first thing queried) position
+        pose.vecPosition[0] = head_pos[0] + (result.get(fdeep::tensor_pos(device_offset, 0, 3)) * 1.879);
+        pose.vecPosition[y_out] = head_pos[1] + (result.get(fdeep::tensor_pos(device_offset, 1, 3)) * 1.879);
+        pose.vecPosition[z_out] = head_pos[2] + (result.get(fdeep::tensor_pos(device_offset, 2, 3)) * 1.879);
 
-    pose.vecPosition[2] -= 2.;
+        GetDriver()->Log(std::to_string(pose.vecPosition[0]) + " " +
+            std::to_string(pose.vecPosition[1]) + " " +
+            std::to_string(pose.vecPosition[2]));
 
-    GetDriver()->Log(std::to_string(pose.vecPosition[0]) + " " + std::to_string(pose.vecPosition[1]) + " " + std::to_string(pose.vecPosition[2]));
+        Eigen::Matrix3f rotMatrix;
 
-    Eigen::Matrix3f rotMatrix;
-    
-    rotMatrix(0,0) = result.get(fdeep::tensor_pos(device_offset, 0));
-    rotMatrix(0,1) = result.get(fdeep::tensor_pos(device_offset, 1));
-    rotMatrix(0,2) = result.get(fdeep::tensor_pos(device_offset, 2));
+        rotMatrix(0, 0) = result.get(fdeep::tensor_pos(device_offset, 0, 0));
+        rotMatrix(0, 1) = result.get(fdeep::tensor_pos(device_offset, 0, 1));
+        rotMatrix(0, 2) = result.get(fdeep::tensor_pos(device_offset, 0, 2));
 
-    // TODO: debug messages that complain if the X/Y/Z magnitude aren't roughly 1.
+        // TODO: debug messages that complain if the X/Y/Z magnitude aren't roughly 1.
 
-    // Swap Y and Z here
-    rotMatrix(y_out,0) = result.get(fdeep::tensor_pos(device_offset, 4));
-    rotMatrix(y_out,1) = result.get(fdeep::tensor_pos(device_offset, 5));
-    rotMatrix(y_out,2) = result.get(fdeep::tensor_pos(device_offset, 6));
+        // Swap Y and Z here
+        rotMatrix(y_out, 0) = result.get(fdeep::tensor_pos(device_offset, 1, 0));
+        rotMatrix(y_out, 1) = result.get(fdeep::tensor_pos(device_offset, 1, 1));
+        rotMatrix(y_out, 2) = result.get(fdeep::tensor_pos(device_offset, 1, 2));
 
-    rotMatrix(z_out,0) = result.get(fdeep::tensor_pos(device_offset, 8));
-    rotMatrix(z_out,1) = result.get(fdeep::tensor_pos(device_offset, 9));
-    rotMatrix(z_out,2) = result.get(fdeep::tensor_pos(device_offset, 10));
+        rotMatrix(z_out, 0) = result.get(fdeep::tensor_pos(device_offset, 2, 0));
+        rotMatrix(z_out, 1) = result.get(fdeep::tensor_pos(device_offset, 2, 1));
+        rotMatrix(z_out, 2) = result.get(fdeep::tensor_pos(device_offset, 2, 2));
 
-    Eigen::Quaternion<float> poseQuat(rotMatrix);
-    pose.qRotation.x = poseQuat.x();
-    pose.qRotation.y = poseQuat.y();
-    pose.qRotation.z = poseQuat.z();
-    pose.qRotation.w = poseQuat.w();
+        Eigen::Quaternion<float> poseQuat(rotMatrix);
+        pose.qRotation.x = poseQuat.x();
+        pose.qRotation.y = poseQuat.y();
+        pose.qRotation.z = poseQuat.z();
+        pose.qRotation.w = poseQuat.w();
 
-    // TODO: Tell OpenVR about our s k e l e t o n
-    // Probably not needed for VRChat, as vrc has its own way of deciding what
-    // goes where independent of tracker role
-    //vr::VRInputComponentHandle_t skeletal_tracking_component;
-    //vr::IVRDriverInput::CreateSkeletonComponent(,
-    //        output_device_paths[device_offset], nullptr,
-    //        vr::EVRSkeletalTrackingLevel::VRSkeletalTracking::Full, nullptr, 0,
-    //        &skeletal_tracking_component);
-    //vr::IVRDriverInput::UpdateSkeletonComponent(skeletal_tracking_component,
-    pose.deviceIsConnected = true;
-    pose.poseIsValid = true;
+        // TODO: Tell OpenVR about our s k e l e t o n
+        // Probably not needed for VRChat, as vrc has its own way of deciding what
+        // goes where independent of tracker role
+        //vr::VRInputComponentHandle_t skeletal_tracking_component;
+        //vr::IVRDriverInput::CreateSkeletonComponent(,
+        //        output_device_paths[device_offset], nullptr,
+        //        vr::EVRSkeletalTrackingLevel::VRSkeletalTracking::Full, nullptr, 0,
+        //        &skeletal_tracking_component);
+        //vr::IVRDriverInput::UpdateSkeletonComponent(skeletal_tracking_component,
+        pose.deviceIsConnected = true;
+        pose.poseIsValid = true;
 
-    // Post pose
-    GetDriver()->GetDriverHost()->TrackedDevicePoseUpdated(this->device_index_,
+        // Post pose
+        GetDriver()->GetDriverHost()->TrackedDevicePoseUpdated(this->device_index_,
             pose, sizeof(vr::DriverPose_t));
-    this->last_pose_ = pose;
+        this->last_pose_ = pose;
+    }
+    catch (std::runtime_error& e) {
+        GetDriver()->Log(e.what());
+        return;
+    }
 }
 
 DeviceType DeepTrackerDriver::TrackerDevice::GetDeviceType()
