@@ -7,9 +7,7 @@ from tensorflow.keras import layers
 from pathlib import Path
 
 from pymo.parsers import BVHParser
-import io
-from pymo.viz_tools import draw_stickfigure, print_skel
-from pymo.preprocessing import MocapParameterizer, RootCentricPositionNormalizer, JointSelector, Numpyfier
+from pymo.preprocessing import MocapParameterizer, JointSelector
 from scipy.spatial.transform import Rotation as R
 from sklearn.pipeline import Pipeline
 
@@ -21,7 +19,7 @@ input_vr_devices = 3
 input_vr_frames = 3
 output_vr_devices = 7
 pretrained = False
-preloaded = False
+preloaded = True
 
 # Production, or quick iteration?
 test_training = True
@@ -30,10 +28,10 @@ test_training = True
 # e.g. [-1., -1, 0] for 'one second ago, one frame ago, current frame'
 def augment_with_prior_frames(data_in, frame_shape=None, framerate=None):
     # TODO: use mocap.frame_time
-    back_1_s = data_in[0 : data_in.shape[0] - 60, :, :]
-    back_1_frame = data_in[1 : data_in.shape[0] - 59, :, :]
-    cur_frame = data_in[60 : data_in.shape[0],:, : ]
-    return np.concatenate((back_1_s, back_1_frame, cur_frame), axis=2)
+    back_1_s = data_in[0 : data_in.shape[0] - 60, :, :, :]
+    back_1_frame = data_in[1 : data_in.shape[0] - 59, :, :, :]
+    cur_frame = data_in[60 : data_in.shape[0],:, : ,:]
+    return np.concatenate((back_1_s, back_1_frame, cur_frame), axis=1)
 
 def load_frames_from_bvh(bvh_file):
     # load file
@@ -53,7 +51,7 @@ def load_frames_from_bvh(bvh_file):
 
     positions = data_pipe.fit_transform([parsed_data])[0]
 
-    dataset = np.zeros((len(rotations.values['Head_Xrotation']), 12, 0))
+    dataset = np.zeros((len(rotations.values['Head_Xrotation']), 0, 3, 4))
     head_starting_positions = None
     for joint_name in ['Head', 'LeftWrist', 'RightWrist',
                        'Hips',
@@ -63,30 +61,26 @@ def load_frames_from_bvh(bvh_file):
         rot_frames = np.vstack(
             (rotations.values[joint_name + '_Xrotation'],
              rotations.values[joint_name + '_Yrotation'],
-             rotations.values[joint_name + '_Zrotation'])).transpose()
-        r = R.from_euler('xyz', rot_frames, degrees=True)
+             rotations.values[joint_name + '_Zrotation']))
+        r = R.from_euler('xyz', rot_frames.transpose(), degrees=True)
         pos_frames = np.vstack(
             (positions.values[joint_name + '_Xposition'],
              positions.values[joint_name + '_Yposition'],
-             positions.values[joint_name + '_Zposition'])).transpose()[:,None]
-
-        # Note, in 3ds Max convention, Z should be up - but it's not clear yet
-        # what convention this data uses.
-        # TODO: Normalize positions relative to head
-        #if joint_name == "Head":
-            #head_starting_positions = pos_frames
-        #pos_frames -= head_starting_positions
+             positions.values[joint_name + '_Zposition'])).transpose()[:,:,None]
 
         print(r.as_matrix().shape)
         print(pos_frames.shape)
         t_matrices = np.concatenate(
             (r.as_matrix(),
-             np.swapaxes(pos_frames, 1, 2)),
+             pos_frames),
             axis=2
         )
+        print(t_matrices.shape)
         # print(t_matrices)
         # t_matrices now container an array of transform matrices, one for every
-        dataset = np.dstack((dataset,t_matrices.reshape(-1,12)))
+        dataset = np.concatenate((dataset,
+                                  t_matrices[:,None,:,:]),
+                                 axis=1)
 
     # TODO: normalize position to where all non-head transforms are
     # relative to the head transform
@@ -95,9 +89,9 @@ def load_frames_from_bvh(bvh_file):
     pos_scale = np.max([np.max(comp) - np.min(comp)
                         for comp in dataset.transpose()])
     print(pos_scale)
-    dataset *= np.array([[1,1,1,1./pos_scale,
-                         1,1,1,1./pos_scale,
-                         1,1,1,1./pos_scale]]*10).transpose()
+    dataset *= np.array([[[1,1,1,1./pos_scale],
+                         [1,1,1,1./pos_scale],
+                         [1,1,1,1./pos_scale]]]*10)
     print(dataset.shape)
     print(dataset)
     #print_skel(parsed_data)
@@ -113,14 +107,14 @@ def load_all_bvh():
             y = fi[fi.files[0]]
         return x, y
 
-    accum_x = np.zeros((0, 12, 9))
-    accum_y = np.zeros((0, 12, 7))
+    accum_x = np.zeros((0, input_vr_devices * input_vr_frames, 3, 4))
+    accum_y = np.zeros((0, output_vr_devices, 3, 4))
     for path in Path('input_bvh').rglob("*.bvh"):
         arr = load_frames_from_bvh(path.absolute())
         if arr.shape[0] < 60:
             continue
-        portion_x = augment_with_prior_frames(arr[:,:,:3])
-        portion_y = arr[:,:,3:][60:]
+        portion_x = augment_with_prior_frames(arr[:,:3,:,:])
+        portion_y = arr[:,3:,:,:][60:]
 
         print(portion_x.shape)
         print(portion_y.shape)
@@ -137,8 +131,8 @@ def load_all_bvh():
     return accum_x, accum_y
 
 
-# Our input set should be converted to shape (12, input_vr_devices*frames) and the
-# output (12, output_vr_devices)
+# Our input set should be converted to shape (input_vr_devices*frames, 3, 4) and the
+# output (output_vr_devices, 3, 4)
 dataset_x, dataset_y = load_all_bvh()
 
 # TODO: translation of non-head transforms should be normalized relative to
@@ -169,19 +163,17 @@ if pretrained:
     model = tf.keras.models.load_model('keras_model.h5')
 else:
     # Construct the input layer with no definite frame size.
-    inp = layers.Input(shape=(12,input_vr_devices * input_vr_frames)) #shape=(None, *x_train.shape[2:]))
+    inp = layers.Input(shape=(input_vr_devices * input_vr_frames, 3, 4)) #shape=(None, *x_train.shape[2:]))
 
-    # followed by a `Conv3D` layer for the spatiotemporal outputs.
-    #x = layers.LSTM(units=4, return_sequences=True, activation="relu",)(inp)
-    #x = layers.LSTM(units=8, return_sequences=True, activation="relu",)(x)
-    #x = layers.LSTM(units=12, return_sequences=True, activation="relu",)(x)
-    #x = layers.Dropout(0.2)(x)
-    #x = layers.Dense(output_vr_devices, activation="sigmoid")(x)
     x = layers.Dropout(0.4)(inp)
-    x = layers.LSTM(units=9, return_sequences=True, activation="tanh",)(x)
-    x = layers.LSTM(units=9, return_sequences=True, activation="tanh",)(x)
-    x = layers.LSTM(units=9, return_sequences=True, activation="tanh",)(x)
+    x = layers.Reshape((-1, 12))(x)
+    x = layers.Permute((2, 1))(x)
+    x = layers.LSTM(units=max(output_vr_devices, input_vr_devices * input_vr_frames), return_sequences=True, activation="tanh",)(x)
+    x = layers.LSTM(units=max(output_vr_devices, input_vr_devices * input_vr_frames), return_sequences=True, activation="tanh",)(x)
+    x = layers.LSTM(units=max(output_vr_devices, input_vr_devices * input_vr_frames), return_sequences=True, activation="tanh",)(x)
     x = layers.Dense(output_vr_devices, activation="tanh")(x)
+    x = layers.Permute((2, 1))(x)
+    x = layers.Reshape((-1, 3, 4))(x)
 
     # Next, we will build the complete model and compile it.
     model = keras.models.Model(inp, x)

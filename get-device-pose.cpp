@@ -5,11 +5,12 @@
 #include <openvr.h>
 #include <iostream>
 #include <cassert>
+#include <logging.hpp>
 
 void initialize_client()
 {
     auto hmdError = vr::VRInitError_None;
-    vr::IVRSystem* pVRSystem = vr::VR_Init(&hmdError, vr::VRApplication_Scene);
+    vr::IVRSystem* pVRSystem = vr::VR_Init(&hmdError, vr::VRApplication_Utility);
     assert(hmdError == vr::VRInitError_None);
 }
 
@@ -20,20 +21,17 @@ void initialize_client()
 // replace with something more consistent
 vr::HmdMatrix34_t getDevicePose(const char* path)
 {
-    static bool initialized = false;
-    if (!initialized)
+    vr::EVRInitError eError;
+    void* m_pVRCompositor = (vr::IVRCompositor*)VR_GetGenericInterface(vr::IVRSystem_Version, &eError);
+    if (eError != vr::EVRInitError::VRInitError_None)
     {
         initialize_client();
-        initialized = true;
     }
     //float seconds_since_last_vsync; uint64_t frame_counter;
 
     //vr::VRSystem()->GetTimeSinceLastVsync(&seconds_since_last_vsync, &frame_counter);
-    if (!vr::VRCompositor())
-    {
-        return vr::HmdMatrix34_t();
-    }
-    assert(vr::VRSystem());
+
+
     vr::TrackedDevicePose_t devicePoses[vr::k_unMaxTrackedDeviceCount];
     vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(
         vr::TrackingUniverseStanding,
@@ -50,23 +48,38 @@ vr::HmdMatrix34_t getDevicePose(const char* path)
         &inputHandle);
     if (error2 != vr::VRInputError_None)
     {
-        std::cout << "failed to get input handle? inactive?";
+        DeepTrackerDriver::Log("failed to get input handle? inactive?");
         return vr::HmdMatrix34_t();
     }
-    vr::InputOriginInfo_t deviceInfo;
-    
-    // Populate deviceInfo with some data about the corresponding device, including deviceIndex
-    auto error3 = vr::VRInput()->GetOriginTrackedDeviceInfo(inputHandle, &deviceInfo, sizeof(deviceInfo));
+    //vr::InputOriginInfo_t deviceInfo;
+ 
+    // Populate deviceInfo with some data about the corresponding device, including deviceIndex - it doesn't seem to like /me/hand/left
+    /*auto error3 = vr::VRInput()->GetOriginTrackedDeviceInfo(inputHandle, &deviceInfo, sizeof(deviceInfo));
     if (error3 != vr::VRInputError_None)
     {
 
-        std::cout << "failed to get tracked device info?";
+        DeepTrackerDriver::Log("failed to get tracked device info?");
         return vr::HmdMatrix34_t();
     }
+    */
+    
+    vr::TrackedDeviceIndex_t dev_index;
+    if (path == "/user/hand/left") {
+        dev_index = vr::VRSystem()->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_LeftHand);
+    }
+    else if (path == "/user/hand/right") {
+        dev_index = vr::VRSystem()->GetTrackedDeviceIndexForControllerRole(vr::TrackedControllerRole_LeftHand);
+    }
+    else {
+        dev_index = 0;
+    }
+    
+    vr::TrackedDevicePose_t* movePose = devicePoses + dev_index;
+    //vr::TrackedDevicePose_t* movePose = devicePoses + deviceInfo.trackedDeviceIndex;
 
-    vr::TrackedDevicePose_t* movePose = devicePoses + deviceInfo.trackedDeviceIndex;
-
-    if (deviceInfo.trackedDeviceIndex != vr::k_unTrackedDeviceIndexInvalid && movePose->bPoseIsValid)
+    if (dev_index != vr::k_unTrackedDeviceIndexInvalid 
+        && movePose->eTrackingResult == vr::TrackingResult_Running_OK
+        && movePose->bPoseIsValid)
     {
         return movePose->mDeviceToAbsoluteTracking;
     }

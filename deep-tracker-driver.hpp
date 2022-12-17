@@ -55,10 +55,8 @@ namespace DeepTrackerDriver {
         // TODO: make this user UserHandPrimary, configurable?
         const char * input_device_paths[3] = {
             k_pchPathUserHead,
-            k_pchPathUserHead,
-            k_pchPathUserHead
-            //k_pchPathUserHandLeft,
-            //k_pchPathUserHandRight
+            k_pchPathUserHandLeft,
+            k_pchPathUserHandRight
         };
 
         // TODO: k_pchPathUserChest would be easy to add
