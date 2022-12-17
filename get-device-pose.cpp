@@ -4,11 +4,13 @@
 
 #include <openvr.h>
 #include <iostream>
+#include <cassert>
 
 void initialize_client()
 {
     auto hmdError = vr::VRInitError_None;
-    vr::IVRSystem* pVRSystem = vr::VR_Init(&hmdError, vr::VRApplication_Background);
+    vr::IVRSystem* pVRSystem = vr::VR_Init(&hmdError, vr::VRApplication_Scene);
+    assert(hmdError == vr::VRInitError_None);
 }
 
 // TODO: this should be the whole 'external tracking' handling class - poll for
@@ -24,19 +26,26 @@ vr::HmdMatrix34_t getDevicePose(const char* path)
         initialize_client();
         initialized = true;
     }
-    float seconds_since_last_vsync; uint64_t frame_counter;
+    //float seconds_since_last_vsync; uint64_t frame_counter;
 
-    vr::VRSystem()->GetTimeSinceLastVsync(&seconds_since_last_vsync, &frame_counter);
+    //vr::VRSystem()->GetTimeSinceLastVsync(&seconds_since_last_vsync, &frame_counter);
+    if (!vr::VRCompositor())
+    {
+        return vr::HmdMatrix34_t();
+    }
+    assert(vr::VRSystem());
     vr::TrackedDevicePose_t devicePoses[vr::k_unMaxTrackedDeviceCount];
     vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(
         vr::TrackingUniverseStanding,
-        seconds_since_last_vsync,
+        0.01f,
         devicePoses,
         vr::k_unMaxTrackedDeviceCount);
 
     // TODO: get 1s, 1frame, and 0 frames ago HMD, wrists poses
     // TODO: correctly get prior frames
     vr::VRInputValueHandle_t inputHandle = 0;
+    assert(vr::VRInput());
+    const auto inputhdl = vr::VRInput();
     auto error2 = vr::VRInput()->GetInputSourceHandle(path,
         &inputHandle);
     if (error2 != vr::VRInputError_None)
@@ -45,28 +54,14 @@ vr::HmdMatrix34_t getDevicePose(const char* path)
         return vr::HmdMatrix34_t();
     }
     vr::InputOriginInfo_t deviceInfo;
+    
     // Populate deviceInfo with some data about the corresponding device, including deviceIndex
     auto error3 = vr::VRInput()->GetOriginTrackedDeviceInfo(inputHandle, &deviceInfo, sizeof(deviceInfo));
-    static double wiggle = 0.;
-    static double signn = -1;
-    wiggle += 0.0001 * signn;
-    if (wiggle > 0.2 || wiggle < -0.2) {
-        signn *= -1.;
-    }
     if (error3 != vr::VRInputError_None)
     {
 
         std::cout << "failed to get tracked device info?";
-        // XXX: for testing
-        auto ret = vr::HmdMatrix34_t();
-        ret.m[0][0] = 1.;
-        ret.m[1][1] = 1.;
-        ret.m[2][2] = 1.;
-        if (path != "/user/head") {
-            ret.m[0][3] = wiggle;
-            ret.m[1][3] = -1.;
-        }
-        return ret;
+        return vr::HmdMatrix34_t();
     }
 
     vr::TrackedDevicePose_t* movePose = devicePoses + deviceInfo.trackedDeviceIndex;

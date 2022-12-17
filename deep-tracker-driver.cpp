@@ -86,6 +86,7 @@ void DeepTrackerDriver::TrackerDevice::Update()
     GetDriver()->Log(std::to_string(pose.vecPosition[0]) + " " + std::to_string(pose.vecPosition[1]) + " " + std::to_string(pose.vecPosition[2]));
 
     Eigen::Matrix3f rotMatrix;
+    
     rotMatrix(0,0) = result.get(fdeep::tensor_pos(device_offset, 0));
     rotMatrix(0,1) = result.get(fdeep::tensor_pos(device_offset, 1));
     rotMatrix(0,2) = result.get(fdeep::tensor_pos(device_offset, 2));
@@ -117,6 +118,8 @@ void DeepTrackerDriver::TrackerDevice::Update()
     //        &skeletal_tracking_component);
     //vr::IVRDriverInput::UpdateSkeletonComponent(skeletal_tracking_component,
     pose.deviceIsConnected = true;
+    pose.poseIsValid = true;
+
     // Post pose
     GetDriver()->GetDriverHost()->TrackedDevicePoseUpdated(this->device_index_,
             pose, sizeof(vr::DriverPose_t));
@@ -145,8 +148,8 @@ vr::EVRInitError DeepTrackerDriver::TrackerDevice::Activate(uint32_t unObjectId)
     // Setup inputs and outputs
     GetDriver()->GetInput()->CreateHapticComponent(props, "/output/haptic", &this->haptic_component_);
 
-    GetDriver()->GetInput()->CreateBooleanComponent(props, "/input/system/click", &this->system_click_component_);
-    GetDriver()->GetInput()->CreateBooleanComponent(props, "/input/system/touch", &this->system_touch_component_);
+    //GetDriver()->GetInput()->CreateBooleanComponent(props, "/input/system/click", &this->system_click_component_);
+    //GetDriver()->GetInput()->CreateBooleanComponent(props, "/input/system/touch", &this->system_touch_component_);
 
     // Set some universe ID (Must be 2 or higher)
     GetDriver()->GetProperties()->SetUint64Property(props, vr::Prop_CurrentUniverseId_Uint64, 2);
@@ -174,7 +177,7 @@ vr::EVRInitError DeepTrackerDriver::TrackerDevice::Activate(uint32_t unObjectId)
     }
     
     // Set controller profile
-    GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_InputProfilePath_String, "{example}/input/example_tracker_bindings.json");
+    GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_InputProfilePath_String, "{example}/input/deep_tracker_input.json");
 
     // Set the icon
     GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_NamedIconPathDeviceReady_String, "{example}/icons/tracker_ready.png");
