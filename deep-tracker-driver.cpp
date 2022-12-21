@@ -169,7 +169,7 @@ vr::EVRInitError DeepTrackerDriver::TrackerDevice::Activate(uint32_t unObjectId)
     GetDriver()->GetProperties()->SetInt32Property(props, vr::Prop_ControllerRoleHint_Int32, vr::ETrackedControllerRole::TrackedControllerRole_OptOut);
 
     // Set up a render model path
-    if (device_offset == 0)
+    /*if (device_offset == 0)
     {
         // waist
         GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_RenderModelName_String, "locator");
@@ -182,7 +182,8 @@ vr::EVRInitError DeepTrackerDriver::TrackerDevice::Activate(uint32_t unObjectId)
     else {
         // feet
         GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_RenderModelName_String, "vr_controller_05_wireless_b");
-    }
+    }*/
+    GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_RenderModelName_String, "cube_indicator");
     
     // Set controller profile
     GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_InputProfilePath_String, "{example}/input/deep_tracker_input.json");

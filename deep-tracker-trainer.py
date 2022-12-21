@@ -1,18 +1,22 @@
+#!/usr/bin/env python3
 import numpy as np
-import matplotlib.pyplot as plt
+import os
+import gc
 
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 from pathlib import Path
+from tensorflow.keras import backend as k
+from tensorflow.keras.callbacks import Callback
 
 from pymo.parsers import BVHParser
-from pymo.preprocessing import MocapParameterizer, JointSelector
+from pymo.preprocessing import MocapParameterizer
 from scipy.spatial.transform import Rotation as R
 from sklearn.pipeline import Pipeline
 
 # adjust print options
-np.set_printoptions(suppress = True, precision=3, linewidth=100, edgeitems=12)
+np.set_printoptions(suppress=True, precision=3, linewidth=100, edgeitems=12)
 
 # VR specific defines
 input_vr_devices = 3
@@ -24,10 +28,18 @@ preloaded = True
 # Production, or quick iteration?
 test_training = True
 
+# https://stackoverflow.com/questions/53683164/
+class ClearMemory(Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        gc.collect()
+        k.clear_session()
+
 # TODO: make this framerate OR framenum based, allow arbitrary frame shapes,
 # e.g. [-1., -1, 0] for 'one second ago, one frame ago, current frame'
 def augment_with_prior_frames(data_in, frame_shape=None, framerate=None):
     # TODO: use mocap.frame_time
+    # TODO: normalize over-time head transform where head(t=0) = 0,0,z,
+    # head(t=-1) = -dx_t, -dy_t, z
     back_1_s = data_in[0 : data_in.shape[0] - 60, :, :, :]
     back_1_frame = data_in[1 : data_in.shape[0] - 59, :, :, :]
     cur_frame = data_in[60 : data_in.shape[0],:, : ,:]
@@ -50,9 +62,9 @@ def load_frames_from_bvh(bvh_file):
     ])
 
     positions = data_pipe.fit_transform([parsed_data])[0]
-
+    head_positions = None
     dataset = np.zeros((len(rotations.values['Head_Xrotation']), 0, 3, 4))
-    head_starting_positions = None
+
     for joint_name in ['Head', 'LeftWrist', 'RightWrist',
                        'Hips',
                        'LeftAnkle', 'RightAnkle',
@@ -66,36 +78,36 @@ def load_frames_from_bvh(bvh_file):
         pos_frames = np.vstack(
             (positions.values[joint_name + '_Xposition'],
              positions.values[joint_name + '_Yposition'],
-             positions.values[joint_name + '_Zposition'])).transpose()[:,:,None]
+             positions.values[joint_name + '_Zposition'])).transpose()[:, :, None]
+        if joint_name == "Head":
+            head_positions = pos_frames.copy()
 
-        print(r.as_matrix().shape)
-        print(pos_frames.shape)
+        # normalize position to where all non-head transforms are
+        # relative to the head transform TODO: un-rotate XZ as well
+        # TODO: do this pure-numpy and after data is loaded so we can
+        # skip loading
+        pos_frames -= head_positions
+
         t_matrices = np.concatenate(
             (r.as_matrix(),
              pos_frames),
             axis=2
         )
-        print(t_matrices.shape)
-        # print(t_matrices)
+        print("r: {} pos_frames: {} t: {}".format(r.as_matrix().shape,
+                                                  pos_frames.shape,
+                                                  t_matrices.shape))
         # t_matrices now container an array of transform matrices, one for every
         dataset = np.concatenate((dataset,
-                                  t_matrices[:,None,:,:]),
+                                  t_matrices[:, None, :, :]),
                                  axis=1)
-
-    # TODO: normalize position to where all non-head transforms are
-    # relative to the head transform
 
     # Normalize position scale [-1,1]
     pos_scale = np.max([np.max(comp) - np.min(comp)
                         for comp in dataset.transpose()])
-    print(pos_scale)
-    dataset *= np.array([[[1,1,1,1./pos_scale],
-                         [1,1,1,1./pos_scale],
-                         [1,1,1,1./pos_scale]]]*10)
-    print(dataset.shape)
-    print(dataset)
-    #print_skel(parsed_data)
-    #draw_stickfigure(positions[0], frame=0)
+    print("Scale factor: {} Overall shape: {}".format(pos_scale, dataset.shape))
+    dataset *= np.array([[[1, 1, 1, 1./pos_scale],
+                         [1, 1, 1, 1./pos_scale],
+                         [1, 1, 1, 1./pos_scale]]]*10)
     return dataset
 
 
@@ -113,18 +125,21 @@ def load_all_bvh():
         arr = load_frames_from_bvh(path.absolute())
         if arr.shape[0] < 60:
             continue
-        portion_x = augment_with_prior_frames(arr[:,:3,:,:])
-        portion_y = arr[:,3:,:,:][60:]
+        portion_x = augment_with_prior_frames(arr[:, :3, :, :])
+        portion_y = arr[:, 3:, :, :][60:]
 
-        print(portion_x.shape)
-        print(portion_y.shape)
         accum_x = np.append(accum_x, portion_x, axis=0)
         accum_y = np.append(accum_y, portion_y, axis=0)
+        print("Accum shape, x: {} y: {}".format(accum_x.shape, accum_y.shape))
+        cur_size = accum_x.size * accum_x.itemsize + accum_y.size * accum_y.itemsize
+        print("Current size: {}B ({:.1f}M)".format(cur_size, cur_size/1024/1024))
+        if cur_size > 2 * 1024 * 1024 * 1024:
+            print("Current size exceeded 2GB, exiting early")
+            break
 
-    # TODO: normalize over-time head transform where head(t=0) = 0,0,z,
-    # head(t=-1) = -dx_t, -dy_t, z
-    print(accum_x.shape)
-    print(accum_y.shape)
+
+    # TODO: save raw, un-normalized loaded data as a different .npz so we can
+    # iterate over it faster
     np.savez('train_data_x.npz', accum_x)
     np.savez('train_data_y.npz', accum_y)
 
@@ -135,21 +150,13 @@ def load_all_bvh():
 # output (output_vr_devices, 3, 4)
 dataset_x, dataset_y = load_all_bvh()
 
-# TODO: translation of non-head transforms should be normalized relative to
-# the head transform - need a way to avoid the X and Y of the head from changing
-# too much
-
 # Split into train and validation sets using indicesing to optimize memory.
 indices = np.arange(dataset_x.shape[0])
 np.random.shuffle(indices)
 train_indices = indices[: int(0.9 * dataset_x.shape[0])]
 val_indices = indices[int(0.9 * dataset_x.shape[0]) :]
 
-# TODO In practice, we're actually going to want the most recent two frames,
-# and a frame 1s ago - let's sample that by going 60 frames back
-
 # Apply the processing function to the datasets - Discard the first 60 Y values, to align with X
-# TODO: augment_with_... must happen BEFORE we shuffle the data
 x_train, y_train = dataset_x[train_indices], dataset_y[train_indices]
 x_val, y_val = dataset_x[val_indices], dataset_y[val_indices]
 
@@ -163,21 +170,22 @@ if pretrained:
     model = tf.keras.models.load_model('keras_model.h5')
 else:
     # Construct the input layer with no definite frame size.
-    inp = layers.Input(shape=(input_vr_devices * input_vr_frames, 3, 4)) #shape=(None, *x_train.shape[2:]))
+    inp = layers.Input(shape=(input_vr_devices * input_vr_frames, 3, 4))
 
-    x = layers.Dropout(0.4)(inp)
+    x = layers.Dropout(0.5)(inp)
     x = layers.Reshape((-1, 12))(x)
     x = layers.Permute((2, 1))(x)
     x = layers.LSTM(units=max(output_vr_devices, input_vr_devices * input_vr_frames), return_sequences=True, activation="tanh",)(x)
     x = layers.LSTM(units=max(output_vr_devices, input_vr_devices * input_vr_frames), return_sequences=True, activation="tanh",)(x)
     x = layers.LSTM(units=max(output_vr_devices, input_vr_devices * input_vr_frames), return_sequences=True, activation="tanh",)(x)
-    x = layers.Dense(output_vr_devices, activation="tanh")(x)
+    x = layers.Dense(output_vr_devices, activation=None)(x)
     x = layers.Permute((2, 1))(x)
     x = layers.Reshape((-1, 3, 4))(x)
 
     # Next, we will build the complete model and compile it.
     model = keras.models.Model(inp, x)
     model.compile(
+        run_eagerly=True,
         #loss=keras.losses.binary_crossentropy,
         loss=keras.losses.mse,
         optimizer=keras.optimizers.Adam(),
@@ -205,9 +213,10 @@ else:
         batch_size=batch_size,
         epochs=epochs,
         validation_data=(x_val, y_val),
-        callbacks=[early_stopping, reduce_lr],
+        callbacks=[early_stopping, reduce_lr, ClearMemory()],
     )
     model.save('keras_model.h5', include_optimizer=False)
+    os.remove('fdeep_model.json')
 
 # Select a random example from the validation dataset.
 example = x_val[np.random.choice(range(len(x_val)), size=1)[0]][:, :]
