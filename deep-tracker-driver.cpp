@@ -77,7 +77,7 @@ void DeepTrackerDriver::TrackerDevice::Update()
         size_t z_out = (data_convention == input_convention::XYZ) ? 2 : 1;
 
         // convert result into vecPosition and qRotation
-        // In the original dataset, most data gets boxed into a value of +-28 units, 
+        // In the original dataset, most data gets boxed into a value of +-28 units,
         // presumably inches? For now, hardcode the scale factor to my height (~6'2")
         // Also add head (first thing queried) position
         pose.vecPosition[0] = head_pos[0] + (result.get(fdeep::tensor_pos(device_offset, 0, 3)) * 1.879);
@@ -106,6 +106,7 @@ void DeepTrackerDriver::TrackerDevice::Update()
         rotMatrix(z_out, 2) = result.get(fdeep::tensor_pos(device_offset, 2, 2));
 
         Eigen::Quaternion<float> poseQuat(rotMatrix);
+        poseQuat.normalize();
         pose.qRotation.x = poseQuat.x();
         pose.qRotation.y = poseQuat.y();
         pose.qRotation.z = poseQuat.z();
@@ -184,7 +185,7 @@ vr::EVRInitError DeepTrackerDriver::TrackerDevice::Activate(uint32_t unObjectId)
         GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_RenderModelName_String, "vr_controller_05_wireless_b");
     }*/
     GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_RenderModelName_String, "cube_indicator");
-    
+
     // Set controller profile
     GetDriver()->GetProperties()->SetStringProperty(props, vr::Prop_InputProfilePath_String, "{example}/input/deep_tracker_input.json");
 

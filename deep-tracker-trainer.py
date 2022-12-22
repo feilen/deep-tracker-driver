@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import numpy as np
+import numpy.linalg as linalg
 import os
 import gc
 
@@ -20,10 +21,10 @@ np.set_printoptions(suppress=True, precision=3, linewidth=100, edgeitems=12)
 
 # VR specific defines
 input_vr_devices = 3
-input_vr_frames = 3
+input_vr_frames = 1  # 3
 output_vr_devices = 7
 pretrained = False
-preloaded = True
+preloaded = False
 
 # Production, or quick iteration?
 test_training = True
@@ -62,7 +63,7 @@ def load_frames_from_bvh(bvh_file):
     ])
 
     positions = data_pipe.fit_transform([parsed_data])[0]
-    head_positions = None
+    head_xz_inverse_matrices = None
     dataset = np.zeros((len(rotations.values['Head_Xrotation']), 0, 3, 4))
 
     for joint_name in ['Head', 'LeftWrist', 'RightWrist',
@@ -79,27 +80,61 @@ def load_frames_from_bvh(bvh_file):
             (positions.values[joint_name + '_Xposition'],
              positions.values[joint_name + '_Yposition'],
              positions.values[joint_name + '_Zposition'])).transpose()[:, :, None]
-        if joint_name == "Head":
-            head_positions = pos_frames.copy()
-
-        # normalize position to where all non-head transforms are
-        # relative to the head transform TODO: un-rotate XZ as well
-        # TODO: do this pure-numpy and after data is loaded so we can
-        # skip loading
-        pos_frames -= head_positions
 
         t_matrices = np.concatenate(
-            (r.as_matrix(),
-             pos_frames),
-            axis=2
+            (
+                np.concatenate(
+                    (
+                        r.as_matrix(),
+                        pos_frames,
+                    ),
+                    axis=2
+                ),
+                np.repeat(np.array([0., 0., 0., 1.])[None, None, :], dataset.shape[0], axis=0)
+            ),
+            axis=1
         )
         print("r: {} pos_frames: {} t: {}".format(r.as_matrix().shape,
                                                   pos_frames.shape,
                                                   t_matrices.shape))
+
+        # Create an inverse-transform matrix for head's XZ position and
+        # Y rotation, so everything's always head-relative except on the
+        # vertical axis
+        # TODO: do this pure-numpy and after data is loaded so we can
+        # skip loading
+        if joint_name == "Head":
+            head_xz_rot_frames = np.vstack(
+                (np.zeros((dataset.shape[0])),
+                 -rotations.values[joint_name + '_Yrotation'],
+                 np.zeros((dataset.shape[0]))))
+            head_xz_r = R.from_euler('xyz', head_xz_rot_frames.transpose(), degrees=True)
+            head_xz_pos_frames = np.vstack(
+                (-positions.values[joint_name + '_Xposition'],
+                 np.zeros((dataset.shape[0])),
+                 -positions.values[joint_name + '_Zposition'])).transpose()[:, :, None]
+            head_xz_inverse_matrices = np.concatenate(
+                (
+                    np.concatenate(
+                        (
+                            head_xz_r.as_matrix(),
+                            head_xz_pos_frames,
+                        ),
+                        axis=2
+                    ),
+                    np.repeat(np.array([0., 0., 0., 1.])[None, None, :], dataset.shape[0], axis=0)
+                ),
+                axis=1
+            )
+
+        # Apply the inverse matrices to every transform (including the head)
+        t_matrices = t_matrices @ head_xz_inverse_matrices
+
         # t_matrices now container an array of transform matrices, one for every
         dataset = np.concatenate((dataset,
-                                  t_matrices[:, None, :, :]),
+                                  t_matrices[:, None, :3, :]),
                                  axis=1)
+        print(dataset)
 
     # Normalize position scale [-1,1]
     pos_scale = np.max([np.max(comp) - np.min(comp)
@@ -123,17 +158,19 @@ def load_all_bvh():
     accum_y = np.zeros((0, output_vr_devices, 3, 4))
     for path in Path('input_bvh').rglob("*.bvh"):
         arr = load_frames_from_bvh(path.absolute())
-        if arr.shape[0] < 60:
-            continue
-        portion_x = augment_with_prior_frames(arr[:, :3, :, :])
-        portion_y = arr[:, 3:, :, :][60:]
+        #if arr.shape[0] < 60:
+            #continue
+        #portion_x = augment_with_prior_frames(arr[:, :3, :, :])
+        #portion_y = arr[:, 3:, :, :][60:]
+        portion_x = arr[:, :input_vr_devices, :, :]
+        portion_y = arr[:, input_vr_devices:, :, :]
 
         accum_x = np.append(accum_x, portion_x, axis=0)
         accum_y = np.append(accum_y, portion_y, axis=0)
         print("Accum shape, x: {} y: {}".format(accum_x.shape, accum_y.shape))
         cur_size = accum_x.size * accum_x.itemsize + accum_y.size * accum_y.itemsize
         print("Current size: {}B ({:.1f}M)".format(cur_size, cur_size/1024/1024))
-        if cur_size > 2 * 1024 * 1024 * 1024:
+        if cur_size > 256 * 1024 * 1024:
             print("Current size exceeded 2GB, exiting early")
             break
 
@@ -216,7 +253,10 @@ else:
         callbacks=[early_stopping, reduce_lr, ClearMemory()],
     )
     model.save('keras_model.h5', include_optimizer=False)
-    os.remove('fdeep_model.json')
+    try:
+        os.remove('fdeep_model.json')
+    except:
+        pass
 
 # Select a random example from the validation dataset.
 example = x_val[np.random.choice(range(len(x_val)), size=1)[0]][:, :]
