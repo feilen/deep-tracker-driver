@@ -33,7 +33,7 @@ void DeepTrackerDriver::TrackerDevice::Update()
     // (devices * frames) devices of
     // 3 rows of
     // 4 columns
-    std::vector<float> head_pos;
+    Eigen::Matrix4f head_correction_mat;
     auto input_tensor = fdeep::tensor(fdeep::tensor_shape(
         sizeof(input_device_paths) / sizeof(input_device_paths[0]) *
         sizeof(trained_offsets) / sizeof(trained_offsets[0]),
@@ -46,20 +46,31 @@ void DeepTrackerDriver::TrackerDevice::Update()
         {
             auto mat = getDevicePose(input_device_paths[j]);
             if (i == 0) {
-                head_pos = {
-                    mat.m[0][3] / 1.879f,
-                    mat.m[1][3] / 1.879f,
-                    mat.m[2][3] / 1.879f
+                // Create a rotation matrix that makes everything relative to the head, locked to the Y axis
+                Eigen::Matrix3f head_rotation_matrix {
+                    {mat.m[0][0], mat.m[0][1], mat.m[0][2]},
+                    {mat.m[1][0], mat.m[1][1], mat.m[1][2]},
+                    {mat.m[2][0], mat.m[2][1], mat.m[2][2]}
                 };
+                Eigen::Vector3f eulerAngles = head_rotation_matrix.eulerAngles(0, 1, 2);
+                head_correction_mat.block<3,3>(0,0) = Eigen::AngleAxisf(-eulerAngles[1], Eigen::Vector3f::UnitY()).toRotationMatrix();
+                head_correction_mat(0, 3) = -mat.m[0][3] / SCALE_FACTOR;
+                head_correction_mat(2, 3) = -mat.m[2][3] / SCALE_FACTOR;
+                head_correction_mat(3, 3) = 1.f;
             }
+            Eigen::Matrix4f device_matrix{
+                {mat.m[0][0], mat.m[0][1], mat.m[0][2], mat.m[0][3] / SCALE_FACTOR},
+                {mat.m[1][0], mat.m[1][1], mat.m[1][2], mat.m[1][3] / SCALE_FACTOR},
+                {mat.m[2][0], mat.m[2][1], mat.m[2][2], mat.m[2][3] / SCALE_FACTOR},
+                {        0.f,         0.f,         0.f,         1.f}
+            };
+            device_matrix *= head_correction_mat;
+
             for (size_t k = 0; k < 3; k++)
             {
                 for (size_t l = 0; l < 4; l++)
                 {
-                    input_tensor.set(fdeep::tensor_pos(i * 3 + j, k, l),
-                        (l == 3) ?
-                        (mat.m[k][l] / 1.879f) - head_pos[k] : // make input position head-relative
-                        mat.m[k][l]);
+                    input_tensor.set(fdeep::tensor_pos(i * 3 + j, k, l), mat.m[k][l]);
                 }
             }
         }
@@ -73,39 +84,27 @@ void DeepTrackerDriver::TrackerDevice::Update()
 
         GetDriver()->Log(fdeep::show_tensor(result));
 
-        size_t y_out = (data_convention == input_convention::XYZ) ? 1 : 2;
-        size_t z_out = (data_convention == input_convention::XYZ) ? 2 : 1;
+        Eigen::Matrix4f result_matrix{
+            {result.get(fdeep::tensor_pos(device_offset, 0, 0)), result.get(fdeep::tensor_pos(device_offset, 0, 1)), result.get(fdeep::tensor_pos(device_offset, 0, 2)), result.get(fdeep::tensor_pos(device_offset, 0, 3))},
+            {result.get(fdeep::tensor_pos(device_offset, 1, 0)), result.get(fdeep::tensor_pos(device_offset, 1, 1)), result.get(fdeep::tensor_pos(device_offset, 1, 2)), result.get(fdeep::tensor_pos(device_offset, 1, 3))},
+            {result.get(fdeep::tensor_pos(device_offset, 2, 0)), result.get(fdeep::tensor_pos(device_offset, 2, 1)), result.get(fdeep::tensor_pos(device_offset, 2, 2)), result.get(fdeep::tensor_pos(device_offset, 2, 3))},
+            {                                               0.f,                                                0.f,                                                0.f,                                                1.f}
+        };
+        result_matrix *= head_correction_mat.inverse();
 
         // convert result into vecPosition and qRotation
         // In the original dataset, most data gets boxed into a value of +-28 units,
         // presumably inches? For now, hardcode the scale factor to my height (~6'2")
         // Also add head (first thing queried) position
-        pose.vecPosition[0] = head_pos[0] + (result.get(fdeep::tensor_pos(device_offset, 0, 3)) * 1.879);
-        pose.vecPosition[y_out] = head_pos[1] + (result.get(fdeep::tensor_pos(device_offset, 1, 3)) * 1.879);
-        pose.vecPosition[z_out] = head_pos[2] + (result.get(fdeep::tensor_pos(device_offset, 2, 3)) * 1.879);
+        pose.vecPosition[0] = result_matrix(0, 3) * SCALE_FACTOR;
+        pose.vecPosition[1] = result_matrix(1, 3) * SCALE_FACTOR;
+        pose.vecPosition[2] = result_matrix(2, 3) * SCALE_FACTOR;
 
         GetDriver()->Log(std::to_string(pose.vecPosition[0]) + " " +
             std::to_string(pose.vecPosition[1]) + " " +
             std::to_string(pose.vecPosition[2]));
 
-        Eigen::Matrix3f rotMatrix;
-
-        rotMatrix(0, 0) = result.get(fdeep::tensor_pos(device_offset, 0, 0));
-        rotMatrix(0, 1) = result.get(fdeep::tensor_pos(device_offset, 0, 1));
-        rotMatrix(0, 2) = result.get(fdeep::tensor_pos(device_offset, 0, 2));
-
-        // TODO: debug messages that complain if the X/Y/Z magnitude aren't roughly 1.
-
-        // Swap Y and Z here
-        rotMatrix(y_out, 0) = result.get(fdeep::tensor_pos(device_offset, 1, 0));
-        rotMatrix(y_out, 1) = result.get(fdeep::tensor_pos(device_offset, 1, 1));
-        rotMatrix(y_out, 2) = result.get(fdeep::tensor_pos(device_offset, 1, 2));
-
-        rotMatrix(z_out, 0) = result.get(fdeep::tensor_pos(device_offset, 2, 0));
-        rotMatrix(z_out, 1) = result.get(fdeep::tensor_pos(device_offset, 2, 1));
-        rotMatrix(z_out, 2) = result.get(fdeep::tensor_pos(device_offset, 2, 2));
-
-        Eigen::Quaternion<float> poseQuat(rotMatrix);
+        Eigen::Quaternion<float> poseQuat(result_matrix.block<3,3>(0,0));
         poseQuat.normalize();
         pose.qRotation.x = poseQuat.x();
         pose.qRotation.y = poseQuat.y();

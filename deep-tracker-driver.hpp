@@ -86,6 +86,7 @@ namespace DeepTrackerDriver {
             offset_marker(int32_t f): offset(f), type(offset_type::FRAME) {};
         };
 
-        const offset_marker trained_offsets[3] = {-60, -1, 0};
+        const offset_marker trained_offsets[1] = {0};
+        const float SCALE_FACTOR = 1.879f;
     };
 };
